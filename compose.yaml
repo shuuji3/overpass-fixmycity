@@ -1,0 +1,68 @@
+# Localhost-only Overpass stack (no Traefik, no TLS, loopback port only).
+#
+#   cp .env.example .env
+#   docker compose run --rm import
+#   docker compose up -d
+#
+# Data lives under ${OVERPASS_DATA_ROOT} (default ./data), which holds db/, diff/
+# and backup/. The upstream production stack remains at infra/docker/compose.yml.
+
+x-overpass: &overpass
+  image: b1tw153/overpass-api:0.7.62.11-r18
+  platform: linux/amd64
+  cpus: ${OVERPASS_CPUS:?}
+  mem_limit: ${OVERPASS_MEMORY:?}
+  memswap_limit: ${OVERPASS_MEMORY:?}
+  environment:
+    OVERPASS_DIFF_URL: ${OVERPASS_DIFF_URL:?}
+    OVERPASS_META_MODE: ${OVERPASS_META_MODE:?}
+    OVERPASS_AREAS: ${OVERPASS_AREAS:?}
+    OVERPASS_REPLICATE_ID: auto
+    OVERPASS_UPDATE_FREQUENCY: 60
+    OVERPASS_BACKUP_TIME: ${OVERPASS_BACKUP_TIME:-}
+    OVERPASS_MIN_FREE_DISK_PERCENT: ${OVERPASS_MIN_FREE_DISK_PERCENT:-5}
+    NGINX_CLIENT_REQ_RATE: ${NGINX_CLIENT_REQ_RATE:-}
+  volumes:
+    - ${OVERPASS_DATA_ROOT:?}/db:/opt/overpass/db
+    - ${OVERPASS_DATA_ROOT:?}/diff:/opt/overpass/diff
+    - ${OVERPASS_DATA_ROOT:?}/backup:/opt/overpass/backup
+  logging:
+    driver: json-file
+    options:
+      max-size: 20m
+      max-file: "5"
+
+services:
+  # Hand the bind-mounted data dirs (created root-owned by Docker) to the image's uid 10001.
+  fix-perms:
+    <<: *overpass
+    user: "0:0"
+    restart: "no"
+    healthcheck:
+      disable: true
+    entrypoint: ["sh", "-c", "chown -R 10001:10001 /opt/overpass/db /opt/overpass/diff /opt/overpass/backup"]
+
+  # One-shot initial load: download extract, import, set replicate_id from OVERPASS_DIFF_URL.
+  import:
+    <<: *overpass
+    profiles: [import]
+    restart: "no"
+    depends_on:
+      fix-perms:
+        condition: service_completed_successfully
+    entrypoint: /opt/overpass/bin/import_osm_data.sh
+    healthcheck:
+      disable: true
+    command:
+      - --data-source=${OVERPASS_IMPORT_URL:?}
+      - --diff-url=${OVERPASS_DIFF_URL:?}
+      - --meta=${OVERPASS_META_MODE:?}
+
+  overpass:
+    <<: *overpass
+    restart: unless-stopped
+    depends_on:
+      fix-perms:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${OVERPASS_LOCAL_PORT:-8080}:8080"
